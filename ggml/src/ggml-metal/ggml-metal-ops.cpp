@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <cmath>
 
@@ -2056,8 +2057,15 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     const int16_t r3 = ne13/ne03;
 
     // find the break-even point where the matrix-matrix kernel becomes more efficient compared
-    // to the matrix-vector kernel
-    const int ne11_mm_min = 8;
+    // to the matrix-vector kernel.
+    // GGML_METAL_NE11_MM_MIN env override: kernel_mul_mm_*_f32 stores both operands as
+    // simdgroup_half8x8 in shared memory. Models whose F32 activations exceed fp16 range
+    // (e.g. talkie's scaleless RMSNorm) overflow to inf when cast to half. Setting this high
+    // forces fall-through to mul_mv_ext / mul_mv, which keep operands in F32.
+    static const int ne11_mm_min = []() {
+        const char * env = std::getenv("GGML_METAL_NE11_MM_MIN");
+        return env ? std::atoi(env) : 8;
+    }();
 
     // first try to use small-batch mat-mv kernels
     // these should be efficient for BS [2, ~8]
