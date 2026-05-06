@@ -1,8 +1,10 @@
 #include "models.h"
 
+#include <cstring>
+
 void llama_model_talkie::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
-    ml.get_key(LLM_KV_LOGIT_SCALE,                 hparams.f_logit_scale);
+    ml.get_key(LLM_KV_LOGIT_SCALE,                 hparams.f_logit_scale, false);
 
     switch (hparams.n_layer()) {
         case 40: type = LLM_TYPE_13B; break;
@@ -22,14 +24,21 @@ void llama_model_talkie::load_arch_tensors(llama_model_loader &) {
         create_tensor_qkv(layer, i, n_embd, n_embd_head_k * n_head, n_embd_gqa, n_embd_gqa, 0);
         layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
 
-        // no k gain
-        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {1, n_head}, 0);
+        // Upstream-converted GGUFs use attn_q_norm/layer_output_scale. Older
+        // PocketAI GGUFs used attn_q_gain/embed_skip; keep those as fallbacks.
+        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {1, n_head}, TENSOR_NOT_REQUIRED);
+        if (!layer.attn_q_norm) {
+            layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_GAIN, "weight", i), {1, n_head}, 0);
+        }
 
         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff}, 0);
         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
 
-        layer.out_scale = create_tensor(tn(LLM_TENSOR_LAYER_OUT_SCALE, "weight", i), {1}, 0);
+        layer.out_scale = create_tensor(tn(LLM_TENSOR_LAYER_OUT_SCALE, "weight", i), {1}, TENSOR_NOT_REQUIRED);
+        if (!layer.out_scale) {
+            layer.out_scale = create_tensor(tn(LLM_TENSOR_EMBED_SKIP, "weight", i), {n_embd}, 0);
+        }
     }
 }
 
@@ -47,70 +56,73 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
     ggml_tensor * inpL;
 
     inpL = build_inp_embd(model.tok_embd);
-    inpL = build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1);
-    cb(inpL, "inp_norm", -1);
 
-    ggml_tensor * embd_skip = inpL;
-
-    // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
-
     auto * inp_attn = build_attn_inp_kv();
-
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+    ggml_tensor * e_x = build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1);
+    e_x = ggml_dup(ctx0, e_x);
+    cb(e_x, "embd_norm", -1);
+
+    cur = ggml_dup(ctx0, e_x);
+
+    const bool legacy_tensor_names =
+        model.layers[0].attn_q_norm != nullptr &&
+        std::strstr(model.layers[0].attn_q_norm->name, "attn_q_gain") != nullptr;
+    const float talkie_freq_scale = legacy_tensor_names ? -1.0f * freq_scale : freq_scale;
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
-        ggml_tensor * inpSA = inpL;
-        ggml_tensor * inp_skip = embd_skip;
+        ggml_tensor * attn_residual = cur;
 
-        cur = build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, il);
-        cb(cur, "attn_norm", il);
+        ggml_tensor * attn_in = build_norm(cur, nullptr, nullptr, LLM_NORM_RMS, il);
+        cb(attn_in, "attn_norm", il);
 
-        // self-attention
-        {
-            auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur,
-                    n_embd_head, n_head, n_head_kv, il);
+        auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], attn_in,
+                n_embd_head, n_head, n_head_kv, il);
 
-            Qcur = ggml_rope_ext(
-                    ctx0, Qcur, inp_pos, nullptr,
-                    n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                    ext_factor, attn_factor, beta_fast, beta_slow);
+        Qcur = ggml_rope_ext(
+                ctx0, Qcur, inp_pos, nullptr,
+                n_rot, rope_type, n_ctx_orig, freq_base, talkie_freq_scale,
+                ext_factor, attn_factor, beta_fast, beta_slow);
 
-            Kcur = ggml_rope_ext(
-                    ctx0, Kcur, inp_pos, nullptr,
-                    n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                    ext_factor, attn_factor, beta_fast, beta_slow);
+        Kcur = ggml_rope_ext(
+                ctx0, Kcur, inp_pos, nullptr,
+                n_rot, rope_type, n_ctx_orig, freq_base, talkie_freq_scale,
+                ext_factor, attn_factor, beta_fast, beta_slow);
 
-            // reference applies qknorm after rope
-            Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
-            cb(Qcur, "Qcur_norm", il);
+        Qcur = build_norm(Qcur, nullptr, nullptr, LLM_NORM_RMS, il);
+        cb(Qcur, "Qcur_norm", il);
 
-            Kcur = build_norm(Kcur, nullptr, nullptr, LLM_NORM_RMS, il);
-            cb(Kcur, "Kcur_norm", il);
+        Kcur = build_norm(Kcur, nullptr, nullptr, LLM_NORM_RMS, il);
+        cb(Kcur, "Kcur_norm", il);
 
-            cb(Vcur, "Vcur", il);
+        ggml_tensor * q_gain_f32 = ggml_cast(ctx0, model.layers[il].attn_q_norm, GGML_TYPE_F32);
+        Qcur = ggml_mul(ctx0, Qcur, q_gain_f32);
+        cb(Qcur, "Qcur_gained", il);
 
-            cur = build_attn(inp_attn,
-                    model.layers[il].wo, nullptr, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
-            cb(cur, "attn_out", il);
-        }
+        cb(Vcur, "Vcur", il);
+
+        cur = build_attn(inp_attn,
+                model.layers[il].wo, nullptr, model.layers[il].wo_s,
+                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+        cb(cur, "attn_out", il);
+
+        cur = ggml_add(ctx0, cur, attn_residual);
+        cb(cur, "after_attn_residual", il);
 
         if (il == n_layer - 1 && inp_out_ids) {
-            cur      = ggml_get_rows(ctx0, cur,      inp_out_ids);
-            inpSA    = ggml_get_rows(ctx0, inpSA,    inp_out_ids);
-            inp_skip = ggml_get_rows(ctx0, inp_skip, inp_out_ids);
+            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+            e_x = ggml_get_rows(ctx0, e_x, inp_out_ids);
         }
 
-        ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
-        cb(ffn_inp, "ffn_inp", il);
+        ggml_tensor * ffn_residual = cur;
 
-        cur = build_norm(ffn_inp, nullptr, nullptr, LLM_NORM_RMS, il);
-        cb(cur, "ffn_norm", il);
+        ggml_tensor * mlp_in = build_norm(cur, nullptr, nullptr, LLM_NORM_RMS, il);
+        cb(mlp_in, "ffn_norm", il);
 
-        cur = build_ffn(cur,
+        cur = build_ffn(mlp_in,
                 model.layers[il].ffn_up,   nullptr, nullptr,
                 model.layers[il].ffn_gate, nullptr, nullptr,
                 model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
@@ -118,21 +130,17 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
 
-        cur = ggml_add(ctx0, cur, ffn_inp);
+        cur = ggml_add(ctx0, cur, ffn_residual);
+        cb(cur, "after_ffn_residual", il);
 
-        ggml_tensor * skip = ggml_mul(ctx0, inp_skip, model.layers[il].out_scale);
-        cb(skip, "embd_skip", il);
-
-        cur = ggml_add(ctx0, cur, skip);
+        ggml_tensor * skip_scale_f32 = ggml_cast(ctx0, model.layers[il].out_scale, GGML_TYPE_F32);
+        ggml_tensor * skip_term = ggml_mul(ctx0, e_x, skip_scale_f32);
+        cur = ggml_add(ctx0, cur, skip_term);
+        cb(cur, "after_embed_skip", il);
 
         cur = build_cvec(cur, il);
         cb(cur, "l_out", il);
-
-        // input for next layer
-        inpL = cur;
     }
-
-    cur = inpL;
 
     cur = build_norm(cur, nullptr, nullptr, LLM_NORM_RMS, -1);
     cb(cur, "result_norm", -1);

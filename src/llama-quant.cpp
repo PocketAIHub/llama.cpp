@@ -310,6 +310,10 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
     quantize &= name.find("altup")  == std::string::npos;
     quantize &= name.find("laurel") == std::string::npos;
 
+    // talkie: per-layer scalar / per-head gain — too small to quantize
+    quantize &= name.find("embed_skip.weight")  == std::string::npos;
+    quantize &= name.find("attn_q_gain.weight") == std::string::npos;
+
     // these are not too big so keep them as it is
     quantize &= name.find("per_layer_model_proj") == std::string::npos;
 
