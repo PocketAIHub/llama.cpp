@@ -59,6 +59,7 @@
 #include "ggml-cuda/gated_delta_net.cuh"
 #include "ggml-cuda/set.cuh"
 #include "ggml-cuda/set-rows.cuh"
+#include "ggml-cuda/turbo-quant.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
 #include "ggml-cuda/solve_tri.cuh"
 #include "ggml-cuda/tri.cuh"
@@ -2576,7 +2577,27 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     return use_mul_mat_vec_q;
 }
 
+static bool ggml_is_turbo_type(ggml_type type) {
+    return type == GGML_TYPE_TURBO4 || type == GGML_TYPE_TURBO3 || type == GGML_TYPE_TURBO2;
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    // TurboQuant types use custom dequant-then-dot kernels (not compatible with mmq/mmvq)
+    if (ggml_is_turbo_type(src0->type) && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
+            && src1->ne[1] == 1 && !ggml_backend_buft_is_cuda_split(src0->buffer->buft)) {
+        cudaStream_t stream = ctx.stream();
+        const int64_t ncols = src0->ne[0];
+        const int64_t nrows = src0->ne[1];
+        if (src0->type == GGML_TYPE_TURBO4) {
+            mul_mat_vec_turbo4_cuda(src0->data, (const float *)src1->data, (float *)dst->data, ncols, nrows, stream);
+        } else if (src0->type == GGML_TYPE_TURBO3) {
+            mul_mat_vec_turbo3_cuda(src0->data, (const float *)src1->data, (float *)dst->data, ncols, nrows, stream);
+        } else {
+            mul_mat_vec_turbo2_cuda(src0->data, (const float *)src1->data, (float *)dst->data, ncols, nrows, stream);
+        }
+        return;
+    }
+
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
@@ -5225,6 +5246,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_BF16:
+                    case GGML_TYPE_TURBO4:
+                    case GGML_TYPE_TURBO3:
+                    case GGML_TYPE_TURBO2:
                         return true;
                     default:
                         return false;
@@ -5245,6 +5269,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_TURBO4:
+                    case GGML_TYPE_TURBO3:
+                    case GGML_TYPE_TURBO2:
                         return true;
                     default:
                         return false;
@@ -5258,7 +5285,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             {
                 return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                        op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
-                       op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL) &&
+                       op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
+                       op->type == GGML_TYPE_TURBO4 || op->type == GGML_TYPE_TURBO3 || op->type == GGML_TYPE_TURBO2) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
             } break;

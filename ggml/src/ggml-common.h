@@ -278,6 +278,46 @@ typedef struct {
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
 //
+// TurboQuant KV cache compression (PolarQuant + QJL)
+// Reference: TurboQuant (ICLR 2026, arXiv:2504.19874)
+//
+
+#define QK_TURBO 32
+
+// turbo4: 4 bits/val = 3-bit PolarQuant indices + 1-bit QJL sign
+// Effective: 6.0 bits/val with per-block overhead (norm, res_norm, rot_seed)
+typedef struct {
+    ggml_half norm;                  // L2 norm of original vector (2 bytes)
+    ggml_half res_norm;              // L2 norm of QJL residual (2 bytes)
+    uint32_t  rot_seed;              // rotation matrix seed for deterministic WHT (4 bytes)
+    uint8_t   qs[QK_TURBO * 3 / 8]; // 3-bit PolarQuant indices, packed (12 bytes)
+    uint8_t   signs[QK_TURBO / 8];  // 1-bit QJL signs, packed (4 bytes)
+} block_turbo4;                      // total: 24 bytes for 32 values
+static_assert(sizeof(block_turbo4) == 2*sizeof(ggml_half) + sizeof(uint32_t) + QK_TURBO * 3 / 8 + QK_TURBO / 8, "wrong turbo4 block size/padding");
+
+// turbo3: 3 bits/val = 2-bit PolarQuant indices + 1-bit QJL sign
+// Effective: 5.0 bits/val with per-block overhead
+typedef struct {
+    ggml_half norm;                  // L2 norm of original vector (2 bytes)
+    ggml_half res_norm;              // L2 norm of QJL residual (2 bytes)
+    uint32_t  rot_seed;              // rotation matrix seed (4 bytes)
+    uint8_t   qs[QK_TURBO * 2 / 8]; // 2-bit PolarQuant indices, packed (8 bytes)
+    uint8_t   signs[QK_TURBO / 8];  // 1-bit QJL signs, packed (4 bytes)
+} block_turbo3;                      // total: 20 bytes for 32 values
+static_assert(sizeof(block_turbo3) == 2*sizeof(ggml_half) + sizeof(uint32_t) + QK_TURBO * 2 / 8 + QK_TURBO / 8, "wrong turbo3 block size/padding");
+
+// turbo2: 2 bits/val = 1-bit PolarQuant index + 1-bit QJL sign
+// Effective: 4.0 bits/val with per-block overhead
+typedef struct {
+    ggml_half norm;                  // L2 norm of original vector (2 bytes)
+    ggml_half res_norm;              // L2 norm of QJL residual (2 bytes)
+    uint32_t  rot_seed;              // rotation matrix seed (4 bytes)
+    uint8_t   qs[QK_TURBO / 8];     // 1-bit PolarQuant indices, packed (4 bytes)
+    uint8_t   signs[QK_TURBO / 8];  // 1-bit QJL signs, packed (4 bytes)
+} block_turbo2;                      // total: 16 bytes for 32 values
+static_assert(sizeof(block_turbo2) == 2*sizeof(ggml_half) + sizeof(uint32_t) + QK_TURBO / 8 + QK_TURBO / 8, "wrong turbo2 block size/padding");
+
+//
 // Super-block quantization structures
 //
 
