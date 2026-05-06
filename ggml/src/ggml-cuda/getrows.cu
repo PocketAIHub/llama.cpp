@@ -1,6 +1,7 @@
 #include "getrows.cuh"
 #include "dequantize.cuh"
 #include "convert.cuh"
+#include "turbo-quant.cuh"
 
 template<int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static __global__ void k_get_rows(
@@ -237,6 +238,21 @@ void get_rows_cuda(
         int64_t ne10, int64_t ne11, int64_t ne12, size_t nb10, size_t nb11, size_t nb12,
         size_t nb1, size_t nb2, size_t nb3,
         cudaStream_t stream) {
+    // TurboQuant types use custom full-block dequantize kernels (always output float)
+    if (src0_type == GGML_TYPE_TURBO4 || src0_type == GGML_TYPE_TURBO3 || src0_type == GGML_TYPE_TURBO2) {
+        GGML_ASSERT(dst_type == GGML_TYPE_F32);
+        if (src0_type == GGML_TYPE_TURBO4) {
+            get_rows_turbo4_cuda(src0_d, src1_d, (float *)dst_d,
+                ne00, ne10, ne11, ne12, nb01, nb02, nb03, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+        } else if (src0_type == GGML_TYPE_TURBO3) {
+            get_rows_turbo3_cuda(src0_d, src1_d, (float *)dst_d,
+                ne00, ne10, ne11, ne12, nb01, nb02, nb03, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+        } else {
+            get_rows_turbo2_cuda(src0_d, src1_d, (float *)dst_d,
+                ne00, ne10, ne11, ne12, nb01, nb02, nb03, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+        }
+        return;
+    }
     switch (dst_type) {
         case GGML_TYPE_F32:
             ggml_cuda_get_rows_switch_src0_type(src0_d, src0_type, src1_d, (float *) dst_d,

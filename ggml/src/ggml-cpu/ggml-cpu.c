@@ -7,6 +7,7 @@
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
 #include "quants.h"
+#include "ggml-turboquant.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
 #include "binary-ops.h"
@@ -283,6 +284,24 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_NVFP4] = {
         .from_float               = quantize_row_nvfp4,
         .vec_dot                  = ggml_vec_dot_nvfp4_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TURBO4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_turbo4_ref,
+        .vec_dot                  = ggml_vec_dot_turbo4_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TURBO3] = {
+        .from_float               = (ggml_from_float_t) quantize_row_turbo3_ref,
+        .vec_dot                  = ggml_vec_dot_turbo3_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TURBO2] = {
+        .from_float               = (ggml_from_float_t) quantize_row_turbo2_ref,
+        .vec_dot                  = ggml_vec_dot_turbo2_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },

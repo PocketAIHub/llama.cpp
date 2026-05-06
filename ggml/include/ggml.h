@@ -429,7 +429,10 @@ extern "C" {
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
-        GGML_TYPE_COUNT   = 42,
+        GGML_TYPE_TURBO2  = 42, // TurboQuant 2-bit: 1-bit PolarQuant + 1-bit QJL
+        GGML_TYPE_TURBO3  = 43, // TurboQuant 3-bit: 2-bit PolarQuant + 1-bit QJL
+        GGML_TYPE_TURBO4  = 44, // TurboQuant 4-bit: 3-bit PolarQuant + 1-bit QJL
+        GGML_TYPE_COUNT   = 45,
     };
 
     // precision
