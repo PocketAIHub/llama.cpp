@@ -148,7 +148,9 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
     res->t_embd = cur;
 
     cur = build_lora_mm(model.output, cur);
-    cur = ggml_scale(ctx0, cur, hparams.f_logit_scale);
+    if (hparams.f_logit_scale) {
+        cur = ggml_scale(ctx0, cur, hparams.f_logit_scale);
+    }
     cb(cur, "result_output", -1);
 
     res->t_logits = cur;
